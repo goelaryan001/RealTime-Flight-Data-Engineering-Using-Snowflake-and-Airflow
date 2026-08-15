@@ -68,7 +68,7 @@ def clean_flight_data(raw: dict) -> pd.DataFrame:
     # 3. Explicit type casting — don't trust pandas' inferred dtypes from mixed JSON
     df["icao24"] = df["icao24"].astype(str)
     df["callsign"] = df["callsign"].astype(str).str.strip().replace({"None": None, "": None})
-    df["origin_country"] = df["origin_country"].astype(str).str.strip()
+    df["origin_country"] = df["origin_country"].astype(str).str.strip().replace({"None": None, "": None})
     df["velocity"] = pd.to_numeric(df["velocity"], errors="coerce")
     df["baro_altitude"] = pd.to_numeric(df["baro_altitude"], errors="coerce")
     df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
@@ -76,6 +76,16 @@ def clean_flight_data(raw: dict) -> pd.DataFrame:
     df["on_ground"] = df["on_ground"].astype(bool)
     df["time_position"] = pd.to_numeric(df["time_position"], errors="coerce")
     df["last_contact"] = pd.to_numeric(df["last_contact"], errors="coerce")
+
+    # 3b. Drop rows with no origin_country at all — gold's entire aggregation
+    #     is grouped by country, so a row that can't be attributed to one has
+    #     nowhere to go in the output and would otherwise resurface later as a
+    #     confusing null-country failure in the data quality gate instead of
+    #     being handled here, at the source.
+    missing_country = df["origin_country"].isna()
+    if missing_country.any():
+        logger.warning(f"Dropping {missing_country.sum()} rows with no origin_country")
+    df = df[~missing_country]
 
     # 4. Flag and drop physically impossible velocity readings (bad sensor data)
     implausible_velocity = df["velocity"] > MAX_PLAUSIBLE_VELOCITY_MS

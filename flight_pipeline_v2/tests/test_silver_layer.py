@@ -39,6 +39,12 @@ def test_drops_stale_reports(mock_raw_data):
     assert "v4w5x6" not in set(df["icao24"])
 
 
+def test_drops_null_origin_country(mock_raw_data):
+    df = clean_flight_data(mock_raw_data)
+    assert "n2o3p4" not in set(df["icao24"])
+    assert df["origin_country"].isna().sum() == 0
+
+
 def test_retains_geospatial_and_timestamp_columns(mock_raw_data):
     df = clean_flight_data(mock_raw_data)
     for col in ["longitude", "latitude", "baro_altitude", "time_position"]:
