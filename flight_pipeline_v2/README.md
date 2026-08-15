@@ -10,6 +10,7 @@ This started from a public tutorial project and was substantially rebuilt: real 
 OpenSky API → [Bronze: raw JSON] → [Silver: cleaned, validated, typed]
    → [Data Quality Gate] → [Gold: time-windowed country aggregates]
    → Snowflake STAGING (MERGE upsert) → Snowflake ANALYTICS (views)
+   → [Dashboard: reads ANALYTICS back out, writes data/dashboard/latest.html]
 ```
 
 Each stage writes its own dated file (`data/bronze/`, `data/silver/`, `data/gold/`) rather than a single job doing everything in memory — this makes it possible to re-run any single stage against the same input, which matters a lot when debugging why gold looks wrong: you can inspect exactly what silver produced without re-hitting the live API.
@@ -66,6 +67,7 @@ scripts/data_quality.py       # quality gate (pure function + Airflow wrapper)
 scripts/gold_layer.py         # time-windowed aggregation (pure function + Airflow wrapper)
 scripts/snowflake_implement.py # Snowflake load
 scripts/snowflake_schema.sql  # staging + analytics schema definition
+scripts/dashboard.py          # reads ANALYTICS views back out, renders data/dashboard/latest.html
 scripts/alerts.py             # Slack failure callback
 tests/                        # pytest suite + mock API response for offline testing
 ```

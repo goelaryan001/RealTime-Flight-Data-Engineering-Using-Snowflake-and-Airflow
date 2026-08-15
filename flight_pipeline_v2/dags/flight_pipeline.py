@@ -13,6 +13,7 @@ from scripts.silver_layer import run_silver_transform
 from scripts.data_quality import run_data_quality_task
 from scripts.gold_layer import run_gold_layer
 from scripts.snowflake_implement import snowflake_load
+from scripts.dashboard import run_dashboard_task
 from scripts.alerts import slack_failure_alert
 
 default_args = {
@@ -59,7 +60,13 @@ with DAG(
         python_callable=snowflake_load,
     )
 
+    dashboard = PythonOperator(
+        task_id="generate_dashboard",
+        python_callable=run_dashboard_task,
+    )
+
     # quality_gate sits between silver and gold deliberately — bad data gets
     # caught and alerted on before it reaches aggregation or the warehouse,
-    # not after
-    bronze >> silver >> quality_gate >> gold >> snowflake
+    # not after. generate_dashboard only runs after snowflake_load succeeds,
+    # so it's always reading back data the pipeline just actually wrote.
+    bronze >> silver >> quality_gate >> gold >> snowflake >> dashboard
