@@ -1,14 +1,22 @@
 """
 Dashboard: the last DAG task, running only after snowflake_load succeeds.
 Queries the two ANALYTICS views and renders a static, self-contained HTML
-report with inline SVG bar charts - no charting library, no internet
-connection needed to view it, just a browser pointed at the output file.
+report with inline SVG bar charts and a client-side country search box - no
+charting library, no server, no internet connection needed to view it, just
+a browser pointed at the output file.
+
+The country search is deliberately client-side (all countries' data embedded
+on the page, filtered with plain JavaScript) rather than a live query per
+keystroke - there's no running server behind this static file to query, and
+the whole dataset (under ~250 countries) is tiny enough that embedding it is
+both simpler and faster than a network round trip would be anyway.
 
 Regenerated every 30 minutes alongside the rest of the pipeline, so
 data/dashboard/latest.html always reflects what's actually in Snowflake
 right now, not a stale snapshot from whenever someone last looked.
 """
 import html
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +26,7 @@ import snowflake.connector
 
 logger = logging.getLogger(__name__)
 
-TOP_N = 10
+TOP_N = 10  # how many countries the bar charts show - the search box covers all of them
 
 COUNTRY_SUMMARY_SQL = """
     SELECT flight_date, origin_country, total_flights, avg_velocity,
@@ -26,20 +34,18 @@ COUNTRY_SUMMARY_SQL = """
     FROM FLIGHTS.ANALYTICS.COUNTRY_DAILY_SUMMARY
     WHERE flight_date = CURRENT_DATE()
     ORDER BY total_flights DESC
-    LIMIT %s
 """
 
 ROLLING_24H_SQL = """
     SELECT origin_country, flights_last_24h, avg_velocity_last_24h, last_loaded_at
     FROM FLIGHTS.ANALYTICS.ROLLING_24H_ACTIVITY
     ORDER BY flights_last_24h DESC
-    LIMIT %s
 """
 
 
-def _query_df(conn, sql: str, params: tuple) -> pd.DataFrame:
+def _query_df(conn, sql: str) -> pd.DataFrame:
     with conn.cursor() as cursor:
-        cursor.execute(sql, params)
+        cursor.execute(sql)
         columns = [c[0].lower() for c in cursor.description]
         rows = cursor.fetchall()
     return pd.DataFrame(rows, columns=columns)
@@ -48,11 +54,12 @@ def _query_df(conn, sql: str, params: tuple) -> pd.DataFrame:
 def fetch_dashboard_data(connection_params: dict) -> dict:
     """Pulls the two ANALYTICS views back out of Snowflake, right after the
     pipeline just wrote to them - this is what proves the load actually
-    worked, not just that the task returned success."""
+    worked, not just that the task returned success. Unlimited (every
+    country, not just the top N) so the search box has something to find."""
     conn = snowflake.connector.connect(**connection_params)
     try:
-        country_summary = _query_df(conn, COUNTRY_SUMMARY_SQL, (TOP_N,))
-        rolling_24h = _query_df(conn, ROLLING_24H_SQL, (TOP_N,))
+        country_summary = _query_df(conn, COUNTRY_SUMMARY_SQL)
+        rolling_24h = _query_df(conn, ROLLING_24H_SQL)
     finally:
         conn.close()
     return {"country_summary": country_summary, "rolling_24h": rolling_24h}
@@ -95,6 +102,32 @@ def _table_html(df: pd.DataFrame, columns: list, headers: list) -> str:
     return f'<table><thead><tr>{head}</tr></thead><tbody>{"".join(body_rows)}</tbody></table>'
 
 
+def _num_or_none(value):
+    return None if pd.isna(value) else float(value)
+
+
+def build_country_index(country_summary: pd.DataFrame, rolling_24h: pd.DataFrame) -> dict:
+    """Merges both views into one lookup keyed by country name - this is the
+    entire dataset the client-side search box searches against. Pure
+    function, no I/O, so it's unit-testable on its own."""
+    index = {}
+    for _, row in country_summary.iterrows():
+        index[row["origin_country"]] = {
+            "total_flights_today": int(row["total_flights"]),
+            "avg_velocity_today": _num_or_none(row["avg_velocity"]),
+            "peak_velocity_today": _num_or_none(row["peak_velocity"]),
+            "avg_altitude_today": _num_or_none(row["avg_altitude"]),
+            "on_ground_today": int(row["total_on_ground"]),
+            "rank_today": int(row["rank_by_volume"]),
+        }
+    for _, row in rolling_24h.iterrows():
+        entry = index.setdefault(row["origin_country"], {})
+        entry["flights_last_24h"] = int(row["flights_last_24h"])
+        entry["avg_velocity_last_24h"] = _num_or_none(row["avg_velocity_last_24h"])
+        entry["last_loaded_at"] = str(row["last_loaded_at"])
+    return index
+
+
 def render_dashboard_html(country_summary: pd.DataFrame, rolling_24h: pd.DataFrame, generated_at: datetime) -> str:
     """Pure function: two DataFrames in, a complete HTML document out. No
     Snowflake/Airflow dependency, so this is unit-testable with fixture
@@ -104,21 +137,30 @@ def render_dashboard_html(country_summary: pd.DataFrame, rolling_24h: pd.DataFra
     flights_last_24h = int(rolling_24h["flights_last_24h"].sum()) if not rolling_24h.empty else 0
     last_loaded = rolling_24h["last_loaded_at"].max() if not rolling_24h.empty else None
 
+    top = country_summary.head(TOP_N)
     volume_chart = _bar_chart_svg(
-        country_summary["origin_country"].tolist() if not country_summary.empty else [],
-        country_summary["total_flights"].tolist() if not country_summary.empty else [],
+        top["origin_country"].tolist() if not top.empty else [],
+        top["total_flights"].tolist() if not top.empty else [],
         color="#f2a93b",
     )
     speed_chart = _bar_chart_svg(
-        country_summary["origin_country"].tolist() if not country_summary.empty else [],
-        country_summary["avg_velocity"].tolist() if not country_summary.empty else [],
+        top["origin_country"].tolist() if not top.empty else [],
+        top["avg_velocity"].tolist() if not top.empty else [],
         color="#57bfe0",
         unit=" m/s",
     )
     rolling_table = _table_html(
-        rolling_24h,
+        rolling_24h.head(TOP_N),
         columns=["origin_country", "flights_last_24h", "avg_velocity_last_24h", "last_loaded_at"],
         headers=["Country", "Flights (24h)", "Avg velocity (24h)", "Last loaded"],
+    )
+
+    country_index = build_country_index(country_summary, rolling_24h)
+    # `.replace("</", "<\\/")` stops a country name containing "</script>"
+    # from prematurely closing the embedded script tag.
+    country_data_json = json.dumps(country_index).replace("</", "<\\/")
+    country_options = "".join(
+        f'<option value="{html.escape(c)}"></option>' for c in sorted(country_index.keys())
     )
 
     return f"""<!doctype html>
@@ -145,6 +187,13 @@ def render_dashboard_html(country_summary: pd.DataFrame, rolling_24h: pd.DataFra
   th,td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }}
   th {{ color:var(--muted); font-weight:600; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em; }}
   .empty {{ color:var(--muted); font-size:0.85rem; }}
+  #countrySearch {{
+    width:100%; padding:10px 14px; font-size:0.95rem; border-radius:8px;
+    border:1px solid var(--border); background:var(--bg); color:var(--text);
+  }}
+  #countrySearch:focus {{ outline:2px solid var(--accent); outline-offset:1px; }}
+  #searchResult {{ margin-top:16px; }}
+  #searchResult h3 {{ font-size:1.05rem; margin:0 0 10px; }}
   footer {{ color:var(--muted); font-size:0.78rem; margin-top:20px; }}
 </style>
 </head>
@@ -159,6 +208,13 @@ def render_dashboard_html(country_summary: pd.DataFrame, rolling_24h: pd.DataFra
     <div class="kpi"><div class="n">{html.escape(str(last_loaded)) if last_loaded is not None else "—"}</div><div class="l">Last loaded (UTC)</div></div>
   </div>
 
+  <div class="panel">
+    <h2>Look up a country</h2>
+    <input id="countrySearch" type="text" list="countryList" placeholder="Type a country name…" autocomplete="off">
+    <datalist id="countryList">{country_options}</datalist>
+    <div id="searchResult"></div>
+  </div>
+
   <div class="grid2">
     <div class="panel">
       <h2>Top {TOP_N} countries by flight volume today</h2>
@@ -171,11 +227,47 @@ def render_dashboard_html(country_summary: pd.DataFrame, rolling_24h: pd.DataFra
   </div>
 
   <div class="panel">
-    <h2>Rolling 24-hour activity</h2>
+    <h2>Rolling 24-hour activity (top {TOP_N})</h2>
     {rolling_table}
   </div>
 
-  <footer>flights_ops_medallion_pipe · generate_dashboard task</footer>
+  <footer>flights_ops_medallion_pipe · generate_dashboard task · {len(country_index)} countries indexed for search</footer>
+
+  <script>
+    const COUNTRY_DATA = {country_data_json};
+    const input = document.getElementById('countrySearch');
+    const result = document.getElementById('searchResult');
+    const names = Object.keys(COUNTRY_DATA);
+
+    function fmt(n, digits) {{
+      return (n === null || n === undefined) ? '—' : n.toFixed(digits === undefined ? 0 : digits);
+    }}
+
+    function render(country, data) {{
+      if (!data) {{
+        result.innerHTML = '<p class="empty">No data for "' + country.replace(/</g, '&lt;') + '" today.</p>';
+        return;
+      }}
+      result.innerHTML =
+        '<h3>' + country.replace(/</g, '&lt;') + '</h3>' +
+        '<div class="kpis">' +
+          '<div class="kpi"><div class="n">' + fmt(data.total_flights_today) + '</div><div class="l">Flights today</div></div>' +
+          '<div class="kpi"><div class="n">' + fmt(data.avg_velocity_today, 1) + '</div><div class="l">Avg velocity (m/s)</div></div>' +
+          '<div class="kpi"><div class="n">' + fmt(data.peak_velocity_today, 1) + '</div><div class="l">Peak velocity (m/s)</div></div>' +
+          '<div class="kpi"><div class="n">' + fmt(data.rank_today) + '</div><div class="l">Rank by volume today</div></div>' +
+          '<div class="kpi"><div class="n">' + fmt(data.flights_last_24h) + '</div><div class="l">Flights, last 24h</div></div>' +
+          '<div class="kpi"><div class="n">' + fmt(data.on_ground_today) + '</div><div class="l">On ground today</div></div>' +
+        '</div>';
+    }}
+
+    input.addEventListener('input', function () {{
+      const q = input.value.trim().toLowerCase();
+      if (!q) {{ result.innerHTML = ''; return; }}
+      const exact = names.find(function (c) {{ return c.toLowerCase() === q; }});
+      const match = exact || names.find(function (c) {{ return c.toLowerCase().startsWith(q); }});
+      render(match || input.value, match ? COUNTRY_DATA[match] : null);
+    }});
+  </script>
 </body>
 </html>
 """

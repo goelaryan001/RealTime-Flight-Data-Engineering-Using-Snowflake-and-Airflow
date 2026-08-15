@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from scripts.dashboard import render_dashboard_html
+from scripts.dashboard import render_dashboard_html, build_country_index, TOP_N
 
 
 @pytest.fixture
@@ -63,3 +63,47 @@ def test_escapes_country_names_against_injection():
     empty = pd.DataFrame(columns=["origin_country", "flights_last_24h", "avg_velocity_last_24h", "last_loaded_at"])
     out = render_dashboard_html(malicious, empty, datetime.now(timezone.utc))
     assert "<script>alert(1)</script>" not in out
+
+
+def test_search_box_present(country_summary, rolling_24h):
+    out = render_dashboard_html(country_summary, rolling_24h, datetime.now(timezone.utc))
+    assert 'id="countrySearch"' in out
+    assert "const COUNTRY_DATA" in out
+
+
+def test_country_index_merges_both_views(country_summary, rolling_24h):
+    index = build_country_index(country_summary, rolling_24h)
+    # United States is in both views - fields from each should both be present
+    assert index["United States"]["total_flights_today"] == 5310
+    assert index["United States"]["flights_last_24h"] == 5310
+    # Canada is only in country_summary (not in the rolling_24h fixture) -
+    # it should still get an entry, just without the rolling-window fields
+    assert index["Canada"]["total_flights_today"] == 458
+    assert "flights_last_24h" not in index["Canada"]
+
+
+def test_search_covers_countries_beyond_the_chart_top_n():
+    # 12 countries - more than TOP_N (10) - the charts only show the top N,
+    # but the search box is supposed to cover every country, not just those
+    many = pd.DataFrame([
+        {"flight_date": "2026-08-15", "origin_country": f"Country{i}", "total_flights": 100 - i,
+         "avg_velocity": 50.0, "peak_velocity": 60.0, "avg_altitude": 1000.0,
+         "total_on_ground": 1, "rank_by_volume": i + 1}
+        for i in range(12)
+    ])
+    empty_rolling = pd.DataFrame(columns=["origin_country", "flights_last_24h", "avg_velocity_last_24h", "last_loaded_at"])
+    assert len(many) > TOP_N
+    out = render_dashboard_html(many, empty_rolling, datetime.now(timezone.utc))
+    # the 12th-ranked country wouldn't make a top-10 chart, but must still be searchable
+    assert "Country11" in out
+
+
+def test_search_json_escapes_against_script_breakout():
+    malicious = pd.DataFrame([
+        {"flight_date": "2026-08-15", "origin_country": "</script><script>alert(1)</script>", "total_flights": 1,
+         "avg_velocity": 1.0, "peak_velocity": 1.0, "avg_altitude": 1.0,
+         "total_on_ground": 0, "rank_by_volume": 1},
+    ])
+    empty = pd.DataFrame(columns=["origin_country", "flights_last_24h", "avg_velocity_last_24h", "last_loaded_at"])
+    out = render_dashboard_html(malicious, empty, datetime.now(timezone.utc))
+    assert "</script><script>" not in out
