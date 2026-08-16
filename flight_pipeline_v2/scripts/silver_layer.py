@@ -58,7 +58,7 @@ def clean_flight_data(raw: dict) -> pd.DataFrame:
     starting_rows = len(df)
 
     # 1. Drop exact duplicate icao24 entries, keeping the most recent by last_contact
-    df = df.sort_values("last_contact", ascending=False).drop_duplicates(subset="icao24", keep="first")
+    df = df.sort_values("last_contact", ascending=False).drop_duplicates(subset="icao24", keep="first")#We keep the newest one
     deduped_rows = len(df)
 
     # 2. Drop rows with no usable velocity AND no usable altitude — these are
@@ -70,7 +70,7 @@ def clean_flight_data(raw: dict) -> pd.DataFrame:
     df["callsign"] = df["callsign"].astype(str).str.strip().replace({"None": None, "": None})
     df["origin_country"] = df["origin_country"].astype(str).str.strip().replace({"None": None, "": None})
     df["velocity"] = pd.to_numeric(df["velocity"], errors="coerce")
-    df["baro_altitude"] = pd.to_numeric(df["baro_altitude"], errors="coerce")
+    df["baro_altitude"] = pd.to_numeric(df["baro_altitude"], errors="coerce") #Coerce change values which cant be changed to Nan instead of crashing
     df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
     df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
     df["on_ground"] = df["on_ground"].astype(bool)

@@ -2,13 +2,7 @@
 Gold layer: cleaned silver DataFrame -> country-level aggregates, bucketed
 into 5-minute time windows using the actual flight timestamp.
 
-The previous version aggregated the entire silver file as one flat group,
-which only worked "by accident" because each DAG run's silver file already
-corresponded to a single poll. Since silver now retains time_position, this
-version buckets explicitly — the aggregation logic no longer depends on an
-unstated assumption about how the file happens to be scoped upstream, which
-makes it correct even if silver's granularity changes later (e.g. if bronze
-starts polling more frequently, or backfills multiple polls into one file).
+
 """
 import logging
 import pandas as pd
@@ -26,7 +20,7 @@ def build_gold_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     working = df.copy()
     working["window_start"] = (
         pd.to_datetime(working["time_position"], unit="s")
-        .dt.floor(f"{WINDOW_MINUTES}min")
+        .dt.floor(f"{WINDOW_MINUTES}min") #round down to nearest 5min timestamp
     )
 
     agg = (
