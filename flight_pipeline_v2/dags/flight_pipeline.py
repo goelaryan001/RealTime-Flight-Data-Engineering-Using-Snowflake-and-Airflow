@@ -8,6 +8,7 @@ AIRFLOW_HOME = Path("/opt/airflow")
 if str(AIRFLOW_HOME) not in sys.path:
     sys.path.insert(0, str(AIRFLOW_HOME))
 
+from scripts.cleanup import run_bronze_cleanup
 from scripts.bronze_layer import run_bronze_ingestion
 from scripts.silver_layer import run_silver_transform
 from scripts.data_quality import run_data_quality_task
@@ -34,6 +35,11 @@ with DAG(
     catchup=False,
     tags=["flights", "medallion", "snowflake"],
 ) as dag:
+
+    cleanup = PythonOperator(
+        task_id="cleanup_stale_bronze",
+        python_callable=run_bronze_cleanup,
+    )
 
     bronze = PythonOperator(
         task_id="bronze_ingest",
@@ -69,4 +75,6 @@ with DAG(
     # caught and alerted on before it reaches aggregation or the warehouse,
     # not after. generate_dashboard only runs after snowflake_load succeeds,
     # so it's always reading back data the pipeline just actually wrote.
-    bronze >> silver >> quality_gate >> gold >> snowflake >> dashboard
+    # cleanup runs first so retention is enforced before each run's new
+    # bronze file lands, rather than needing a separate scheduled job.
+    cleanup >> bronze >> silver >> quality_gate >> gold >> snowflake >> dashboard
